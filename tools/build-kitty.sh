@@ -9,4 +9,5 @@ export PATH="$HOME/.local/go/bin:$PATH"
 export GOROOT="${GOROOT:-$HOME/.local/go}"
 go version
 ./dev.sh build "$@"
-echo "== ok: rode ./kitty/launcher/kitty --version =="
+echo "== ok: rode ./kitty/kitty/launcher/kitty --version =="
+echo "(caminho dobra 'kitty/kitty' porque o dir do clone tem o mesmo nome do pacote)"
