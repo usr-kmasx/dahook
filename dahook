@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# dahook — o app. Backend: kitty compilado do source (kitty/).
+# Uso: ./dahook [args-do-kitty...]   (ex.: ./dahook --version)
+set -eu
+ROOT="$(cd "$(dirname "$0")" && pwd)"
+BACKEND="$ROOT/kitty/kitty/launcher/kitty"
+if [ ! -x "$BACKEND" ]; then
+  echo "dahook: backend não compilado. Rode: ./tools/build-kitty.sh" >&2
+  exit 1
+fi
+export KITTY_CONFIG_DIRECTORY="$ROOT/dahook-config"
+exec "$BACKEND" --class dahook -T dahook "$@"
