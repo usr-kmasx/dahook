@@ -1,0 +1,14 @@
+# build outputs (binários nunca entram no repo)
+dahook-qt/build/
+dahook-app/target/
+# python
+dahook-py/.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+# bases upstream (clones; viram submodule/fork depois)
+browser/
+kitty/
+# editor / OS
+*~
+.DS_Store
