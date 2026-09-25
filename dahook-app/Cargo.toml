@@ -1,9 +1,14 @@
 [package]
-name = "dahook-app"
+name = "dahook"
 version = "0.1.0"
 edition = "2021"
-description = "dahook: um app so. Terminal (kitty) que vira browser isolado visualmente. X volta ao terminal."
+
+[[bin]]
+name = "dahook"
+path = "src/main.rs"
 
 [dependencies]
-clap = { version = "4", features = ["derive"] }
-anyhow = "1"
+gtk4 = { version = "0.11", features = ["v4_22"] }
+vte4 = { version = "0.10", features = ["v0_84"] }
+webkit6 = "0.6"
+libc = "0.2"
