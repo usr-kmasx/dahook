@@ -195,6 +195,8 @@ pub struct DahookConfig {
     pub window_padding: i32,
     pub shell: Option<(String, Vec<String>)>,
     pub env: HashMap<String, String>,
+    /// Bloqueador estilo uBO ligado (padrão). `no` desliga tudo.
+    pub adblock: bool,
     /// Opções válidas do kitty sem equivalente no VTE (só aviso).
     pub ignored: Vec<String>,
 }
@@ -219,6 +221,7 @@ impl Default for DahookConfig {
             window_padding: 0,
             shell: None,
             env: HashMap::new(),
+            adblock: true,
             ignored: Vec::new(),
         }
     }
@@ -242,6 +245,7 @@ const SUPPORTED: &[&str] = &[
     "window_padding_width",
     "shell",
     "env",
+    "adblock",
     "include",
 ];
 
@@ -438,6 +442,12 @@ impl DahookConfig {
                     self.env.insert(k.trim().to_string(), v.trim().to_string());
                 }
             }
+            "adblock" => {
+                self.adblock = matches!(
+                    val.to_lowercase().as_str(),
+                    "yes" | "true" | "on" | "1"
+                );
+            }
             _ if is_color_key(key) => {
                 if let (Ok(n), Some(c)) =
                     (key[5..].parse::<u8>(), parse_color(val))
@@ -559,6 +569,9 @@ const EXAMPLE: &str = r#"# dahook.conf — mesma sintaxe e opções do kitty.con
 # shell fish
 # env EDITOR=nvim
 
+# Bloqueador estilo uBlock (listas EasyList+EasyPrivacy, padrão ligado).
+# adblock no
+
 # kitty_mod ctrl+shift
 # Atalhos: mesma sintaxe `map` do kitty. Sem nenhum map no conf,
 # valem os defaults do kitty (ctrl+shift+t nova tab, ctrl+shift+q fecha, ...).
@@ -642,6 +655,17 @@ mod tests {
     fn shell_dot_means_default() {
         let c = DahookConfig::parse("shell .\n");
         assert_eq!(c.shell, None);
+    }
+
+    #[test]
+    fn adblock_conf_toggle() {
+        let on = DahookConfig::parse("adblock yes\n");
+        assert!(on.adblock);
+        let off = DahookConfig::parse("adblock no\n");
+        assert!(!off.adblock);
+        // Padrão ligado; opção conhecida (não vai para ignoradas).
+        assert!(DahookConfig::default().adblock);
+        assert!(!off.ignored.contains(&"adblock".to_string()));
     }
 
     #[test]
