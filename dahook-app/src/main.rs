@@ -862,10 +862,16 @@ fn new_browser_tab(state: &Shared, url: &str) {
                 .borrow_mut()
                 .push(Box::new(move || dl2.cancel()));
         }
+        // finished pode chegar DEPOIS de failed na corrida cancela-
+        // no-fim (bytes completos, sinal final pendente): o flag impede
+        // o "salvo" fantasma e o done() duplo satura em 0.
+        let finished = Rc::new(std::cell::Cell::new(false));
         {
             let d = dlstop.clone();
             let dlf = dest.clone();
+            let fin = finished.clone();
             dl.connect_finished(move |_| {
+                fin.set(true);
                 eprintln!("dahook: download salvo em {}", dlf.display());
                 notify(&format!(
                     "Download concluído: {}",
@@ -878,6 +884,10 @@ fn new_browser_tab(state: &Shared, url: &str) {
             let d = dlstop.clone();
             let dle = dest.clone();
             dl.connect_failed(move |_, e| {
+                if finished.get() {
+                    d.done();
+                    return;
+                }
                 eprintln!("dahook: download falhou ({}): {e}", dle.display());
                 // Parcial não serve (sem resume): remove, como browsers.
                 let _ = std::fs::remove_file(&dle);
