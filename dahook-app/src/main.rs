@@ -541,11 +541,6 @@ fn ytdlp_available() -> bool {
         .is_ok()
 }
 
-/// Roda yt-dlp destacado numa thread que espera e notifica no fim.
-/// Filho direto + wait na thread = sem zumbi; se o app fechar antes,
-/// o init adota e o download continua. Sem progresso em tempo real:
-/// só notify-send no fim (ok/falha).
-
 /// Navegador com cookies para o yt-dlp (YouTube exige login anti-bot;
 /// sem cookies dá "Sign in to confirm you're not a bot").
 fn cookie_browser() -> Option<&'static str> {
@@ -884,6 +879,8 @@ fn new_browser_tab(state: &Shared, url: &str) {
             let dle = dest.clone();
             dl.connect_failed(move |_, e| {
                 eprintln!("dahook: download falhou ({}): {e}", dle.display());
+                // Parcial não serve (sem resume): remove, como browsers.
+                let _ = std::fs::remove_file(&dle);
                 // Cancelado pelo ■: silêncio (o usuário mandou parar).
                 if !e.message().to_string().to_lowercase().contains("cancel") {
                     notify(&format!("Download falhou: {e}"));
@@ -2129,7 +2126,7 @@ fn build_ui(app: &gtk4::Application) {
             }
             // Com ■ na tab atual (menu foi clicado nela em 99% dos
             // casos); sem tab browser, destacado sem ■. De todo modo,
-            // só notify no fim — sem progresso em tempo real.
+            // só notify no fim (o % real vai para o hover do ■).
             let cur: Option<(gtk4::Widget, DlStop)> = {
                 let st = s.borrow();
                 current_idx(&st).and_then(|i| match &st.tabs[i].kind {
@@ -2168,7 +2165,10 @@ fn build_ui(app: &gtk4::Application) {
                 .unwrap_or_default();
             open_url_in(&s, &raw);
         });
-        app.add_action(&act);
+        // Segunda janela não re-registra: o open-url segue na primeira.
+        if app.lookup_action("open-url").is_none() {
+            app.add_action(&act);
+        }
     }
 
     // Clique na tab -> título da janela acompanha (conectado uma vez só).

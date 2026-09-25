@@ -62,7 +62,8 @@ com 1 tab só, `<` `>` + URL aparecem também na **barra abaixo**
 sem roubar o que você digita.
 
 O comando `dahook` (`~/.local/bin/dahook`) fala com a instância principal
-via Gio actions (`open-url`); se o app estiver fechado, o D-Bus o ativa.
+via Gio actions (`open-url`); se o app estiver fechado, o script o sobe
+destacado e espera o bus.
 A tab terminal de onde o comando foi digitado fecha sozinha (terminal
 vira browser); digitado fora do app, só abre. Tabs têm botão ×.
 
