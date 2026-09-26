@@ -55,23 +55,29 @@ e sobe o app destacado se estiver fechado. Para (re)criá-lo:
 cat > ~/.local/bin/dahook <<'EOF'
 #!/bin/sh
 # dahook <url> — abre a URL em nova tab browser dentro do app dahook.
+# Fala com a instância principal via Gio actions (single-instance).
+# Se o app estiver fechado, sobe ele destacado e espera o bus.
 APP_ID=dev.dahook.terminal
 APP_BIN=/home/usr/Projetos/dahook/dahook-app/target/debug/dahook
+# Fallback: release se debug não existir (ex: após `cargo clean`).
 [ -x "$APP_BIN" ] || APP_BIN=/home/usr/Projetos/dahook/dahook-app/target/release/dahook
 if [ ! -x "$APP_BIN" ]; then
   echo "dahook: binário não encontrado; rode \`cargo build\` em ~/Projetos/dahook/dahook-app" >&2
   exit 1
 fi
+
 url="${1:-https://duckduckgo.com}"
 case "$url" in
 http://* | https://* | file://* | about:* | data:* | view-source:*) ;;
 *) url="https://$url" ;;
 esac
+
 has_owner() {
   dbus-send --session --print-reply --dest=org.freedesktop.DBus \
     /org/freedesktop/DBus org.freedesktop.DBus.NameHasOwner "string:$APP_ID" 2>/dev/null |
     grep -q "boolean true"
 }
+
 if ! has_owner; then
   setsid "$APP_BIN" >/dev/null 2>&1 < /dev/null &
   for _ in $(seq 1 100); do
