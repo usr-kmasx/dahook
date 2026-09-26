@@ -123,4 +123,7 @@ DRM (Widevine/Spotify/Netflix) não existe no WebKit Linux.
 - `send_text`/`launch`/`load_config_file`/`set_background_opacity`
   implementados; resto além do MVP avisa e ignora.
 - `DAHOOK_DEBUG_KEYS=1` loga teclas/ações; `DAHOOK_APP_ID` isola instâncias.
+- Backend gráfico padrão é X11 (`GDK_BACKEND=x11` forçado no `main`);
+  no Wayland nativo as teclas mortas não compõem acento.
+  Opt-out: `GDK_BACKEND=wayland dahook`.
 - Testes: `cargo test` (parser, maps, includes, URIs).

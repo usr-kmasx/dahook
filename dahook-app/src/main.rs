@@ -2710,6 +2710,16 @@ fn build_ui(app: &gtk4::Application) {
 }
 
 fn main() {
+    // Backend gráfico: X11 por padrão. No Wayland nativo as teclas
+    // mortas (´ ^ ~) não compõem acento no app, e o controlador de
+    // atalhos já foi auditado (só passa adiante, nunca consome).
+    // Opt-out: GDK_BACKEND=wayland (ou outro) exportado vale.
+    if std::env::var("GDK_BACKEND").is_err() {
+        // SAFETY: processo single-thread aqui (antes do GTK iniciar).
+        unsafe {
+            std::env::set_var("GDK_BACKEND", "x11");
+        }
+    }
     // DAHOOK_APP_ID permite instâncias isoladas (ex: testes sem colidir
     // com o app principal, que é single-instance por APP_ID).
     let app_id =
