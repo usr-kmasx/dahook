@@ -189,8 +189,6 @@ enum TabKind {
     },
     Web {
         view: webkit6::WebView,
-        /// Content manager próprio (adblock + futuros scripts da tab).
-        ucm: webkit6::UserContentManager,
         /// Barra de URL abaixo das tabs. Visível só com 1 tab total
         /// (com 2+, edita direto na tab).
         urlrow: gtk4::Box,
@@ -213,8 +211,6 @@ struct State {
     controller: Option<gtk4::EventControllerKey>,
     /// Ação Gio do menu "Baixar mídia (yt-dlp)" (param = URL).
     dl_action: gtk4::gio::SimpleAction,
-    /// Filtros estilo uBO compilados (vazio = desligado/carregando).
-    adblock: AdblockState,
     /// (origem, tipo) -> permitido. Decisões de permissão lembradas na sessão.
     perms: std::collections::HashMap<(String, String), bool>,
 }
@@ -585,499 +581,6 @@ fn cookie_browser() -> Option<&'static str> {
     None
 }
 
-/// Adblock estilo uBO (a extensão não roda no WebKitGTK): baixa
-/// EasyList+EasyPrivacy, converte o subconjunto fiel para o JSON de
-/// content-blocker do WebKit e aplica por tab. Liga/desliga global:
-/// `adblock yes|no` no conf (padrão ligado; F5 reaplica).
-const FILTER_SOURCES: &[(&str, &str)] = &[
-    ("dahook-easylist", "https://easylist.to/easylist/easylist.txt"),
-    ("dahook-easyprivacy", "https://easylist.to/easylist/easyprivacy.txt"),
-];
-/// Idade máxima do cache antes de baixar de novo.
-const FILTER_MAX_AGE_SECS: u64 = 7 * 24 * 3600;
-/// Teto de regras por filtro (o WebKit rejeita JSON gigante).
-const FILTER_RULE_CAP: usize = 45_000;
-
-fn filter_cache_dir() -> PathBuf {
-    let base = std::env::var("XDG_CACHE_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| {
-            let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-            PathBuf::from(home).join(".cache")
-        });
-    base.join("dahook").join("filters")
-}
-
-fn filter_stamp(id: &str) -> PathBuf {
-    filter_cache_dir().join(format!("ublock.{id}.stamp"))
-}
-
-fn filter_now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}
-
-fn filter_fresh() -> bool {
-    FILTER_SOURCES.iter().all(|(id, _)| {
-        std::fs::read_to_string(filter_stamp(id))
-            .ok()
-            .and_then(|s| s.trim().parse::<u64>().ok())
-            .is_some_and(|t| filter_now().saturating_sub(t) < FILTER_MAX_AGE_SECS)
-    })
-}
-
-/// Carimba SÓ após save válido: cache "fresco" sem filtro salvo
-/// nunca acontece (falha anterior rebaixa sozinha).
-fn filter_touch(id: &str) {
-    let _ = std::fs::create_dir_all(filter_cache_dir());
-    let _ = std::fs::write(filter_stamp(id), filter_now().to_string());
-}
-
-fn json_escape(s: &str) -> String {
-    let mut o = String::with_capacity(s.len() + 2);
-    for c in s.chars() {
-        match c {
-            '"' => o.push_str("\\\""),
-            '\\' => o.push_str("\\\\"),
-            '\n' => o.push_str("\\n"),
-            '\r' => o.push_str("\\r"),
-            '\t' => o.push_str("\\t"),
-            c if (c as u32) < 0x20 => o.push_str(&format!("\\u{:04x}", c as u32)),
-            c => o.push(c),
-        }
-    }
-    o
-}
-
-/// Pattern ABP -> regex do content-blocker (`||ads.com^banner` vira
-/// `^https?://([^/]*\.)?ads\.com([^...]|$)banner`). None = sem
-/// representação (regex ABP `/.../`, pattern vazio).
-fn abp_regex(pat: &str) -> Option<String> {
-    if pat.starts_with('/') && pat.len() > 1 {
-        return None;
-    }
-    let mut p = pat;
-    let mut out = String::new();
-    if let Some(rest) = p.strip_prefix("||") {
-        out.push_str("^https?://([^/]*\\.)?");
-        p = rest;
-    } else if let Some(rest) = p.strip_prefix('|') {
-        out.push('^');
-        p = rest;
-    }
-    let mut end = String::new();
-    if p.ends_with('|') && p.len() > 1 {
-        end.push('$');
-        p = &p[..p.len() - 1];
-    }
-    if p.is_empty() {
-        return None;
-    }
-    for c in p.chars() {
-        match c {
-            '*' => out.push_str(".*"),
-            // `^` = separador: tudo exceto letra/dígito/_/./%/-.
-            // (Sem `|$`: o motor do WebKit não aceita disjunção `|`.
-            // Sub-bloqueia um pouco no fim exato de URL, nunca erra p/ mais.)
-            '^' => out.push_str("[^a-zA-Z0-9_.%-]"),
-            '.' | '+' | '?' | '$' | '{' | '}' | '(' | ')' | '[' | ']' | '|' | '\\' => {
-                out.push('\\');
-                out.push(c);
-            }
-            c => out.push(c),
-        }
-    }
-    out.push_str(&end);
-    Some(out)
-}
-
-fn abp_resource(opt: &str) -> Option<&'static str> {
-    match opt {
-        "script" => Some("script"),
-        "image" => Some("image"),
-        "stylesheet" => Some("style-sheet"),
-        "media" => Some("media"),
-        "font" => Some("font"),
-        "object" => Some("object"),
-        "subdocument" | "frame" | "document" => Some("document"),
-        "xmlhttprequest" | "xhr" | "other" | "object-subrequest" | "fetch" => Some("raw"),
-        _ => None,
-    }
-}
-
-/// Tokens `$` sem efeito aqui (só afetariam prioridade/nuance):
-/// ignorar é seguro (pode sub-bloquear um pouco, nunca quebra site).
-const ABP_IGNORE_OPTS: &[&str] = &["important", "match-case", "donottrack", "empty", "mp4"];
-
-/// Tipos de recurso que o WebKit não tem (websocket, ping, webrtc):
-/// se a regra mira SÓ neles, pular (aplicar sem o tipo viraria
-/// "bloqueia tudo" — foi o `*$ping,third-party` que matou o YouTube).
-/// Com tipo mapeável junto, ignora o extra (sub-bloqueio seguro).
-const ABP_UNMAPPABLE_RES: &[&str] = &["websocket", "ping", "webrtc"];
-
-/// Regra de rede ABP -> objeto JSON (`@@` vira ignore-previous-rules).
-/// None = modificador sem mapeamento fiel (csp, redirect, popup...):
-/// pular é seguro, aplicar errado quebraria sites.
-fn network_rule(line: &str) -> Option<String> {
-    let (mut pat, mut exception) = (line, false);
-    if let Some(rest) = pat.strip_prefix("@@") {
-        exception = true;
-        pat = rest;
-    }
-    let (pat, opts) = match pat.split_once('$') {
-        Some((p, o)) => (p, o),
-        None => (pat, ""),
-    };
-    if pat.is_empty() {
-        return None;
-    }
-    // Pattern `*` puro sem opções = "bloqueia tudo": nenhuma lista séria
-    // envia isso; se enviar, é erro — nunca aplicar.
-    if pat == "*" && opts.is_empty() {
-        return None;
-    }
-    let mut res_types: Vec<&str> = Vec::new();
-    let mut saw_unmappable = false;
-    let mut if_domain: Vec<String> = Vec::new();
-    let mut unless_domain: Vec<String> = Vec::new();
-    let mut load_type: Option<&str> = None;
-    for opt in opts.split(',') {
-        let opt = opt.trim();
-        if opt.is_empty() {
-            continue;
-        }
-        if let Some(v) = opt.strip_prefix("domain=") {
-            for d in v.split('|') {
-                if d.is_empty() {
-                    continue;
-                }
-                if let Some(bare) = d.strip_prefix('~') {
-                    if bare.is_empty() || bare.contains(['/', '*', ' ', ':']) {
-                        return None;
-                    }
-                    unless_domain.push(format!("*{bare}"));
-                } else {
-                    if d.contains(['/', '*', ' ', ':']) {
-                        return None;
-                    }
-                    if_domain.push(format!("*{d}"));
-                }
-            }
-            continue;
-        }
-        match opt {
-            "third-party" => load_type = Some("third-party"),
-            "first-party" | "~third-party" => load_type = Some("first-party"),
-            "~first-party" => load_type = Some("third-party"),
-            t if abp_resource(t).is_some() => res_types.push(abp_resource(t).unwrap()),
-            t if ABP_UNMAPPABLE_RES.contains(&t) => saw_unmappable = true,
-            t if ABP_IGNORE_OPTS.contains(&t) => {}
-            // `$~script` e cia (negação de tipo) não existem no WebKit.
-            _ => return None,
-        }
-    }
-    // Mira só em tipo sem mapeamento: sem restrição aplicável, pular
-    // (senão vira "bloqueia tudo do escopo").
-    if res_types.is_empty() && saw_unmappable {
-        return None;
-    }
-    let url_filter = abp_regex(pat)?;
-    let mut parts = vec![format!("\"url-filter\":\"{}\"", json_escape(&url_filter))];
-    if !res_types.is_empty() {
-        parts.push(format!(
-            "\"resource-type\":[{}]",
-            res_types
-                .iter()
-                .map(|t| format!("\"{t}\""))
-                .collect::<Vec<_>>()
-                .join(",")
-        ));
-    }
-    if !if_domain.is_empty() {
-        parts.push(format!(
-            "\"if-domain\":[{}]",
-            if_domain
-                .iter()
-                .map(|d| format!("\"{}\"", json_escape(d)))
-                .collect::<Vec<_>>()
-                .join(",")
-        ));
-    }
-    if !unless_domain.is_empty() {
-        parts.push(format!(
-            "\"unless-domain\":[{}]",
-            unless_domain
-                .iter()
-                .map(|d| format!("\"{}\"", json_escape(d)))
-                .collect::<Vec<_>>()
-                .join(",")
-        ));
-    }
-    if let Some(lt) = load_type {
-        parts.push(format!("\"load-type\":[\"{lt}\"]"));
-    }
-    let action = if exception {
-        "{\"type\":\"ignore-previous-rules\"}"
-    } else {
-        "{\"type\":\"block\"}"
-    };
-    Some(format!(
-        "{{\"trigger\":{{{}}},\"action\":{action}}}",
-        parts.join(",")
-    ))
-}
-
-/// Cosmético ABP (`a.com##.ad`, `##.ad`, `a.com#@#.ad`) -> css-display-none.
-/// Procedural (`:has(`, `+js`, `:style(`...) não existe no WebKit: pula.
-fn cosmetic_rule(line: &str) -> Option<String> {
-    let (di, exception) = match (line.find("#@#"), line.find("##")) {
-        (Some(a), Some(b)) => {
-            if a < b {
-                (a, true)
-            } else {
-                (b, false)
-            }
-        }
-        (Some(a), None) => (a, true),
-        (None, Some(b)) => (b, false),
-        (None, None) => return None,
-    };
-    let (doms, sel) = (&line[..di], line[di + if exception { 3 } else { 2 }..].trim());
-    if sel.is_empty() || sel.contains('(') || sel.contains("+js") {
-        return None;
-    }
-    let mut parts = vec!["\"url-filter\":\".*\"".to_string()];
-    if !doms.is_empty() {
-        let mut ifd = Vec::new();
-        let mut unless = Vec::new();
-        for d in doms.split(',') {
-            let d = d.trim();
-            if d.is_empty() {
-                continue;
-            }
-            if let Some(bare) = d.strip_prefix('~') {
-                if bare.is_empty() || bare.contains(['/', '*', ' ', ':']) {
-                    return None;
-                }
-                unless.push(format!("\"*{}\"", json_escape(bare)));
-            } else {
-                if d.contains(['/', '*', ' ', ':']) {
-                    return None;
-                }
-                ifd.push(format!("\"*{}\"", json_escape(d)));
-            }
-        }
-        if ifd.is_empty() && unless.is_empty() {
-            return None;
-        }
-        if !ifd.is_empty() {
-            parts.push(format!("\"if-domain\":[{}]", ifd.join(",")));
-        }
-        if !unless.is_empty() {
-            parts.push(format!("\"unless-domain\":[{}]", unless.join(",")));
-        }
-    } else if exception {
-        // `#@#` global desliga tudo: sem expressão fiel, pula.
-        return None;
-    }
-    let action = if exception {
-        "{\"type\":\"ignore-previous-rules\"}".to_string()
-    } else {
-        format!(
-            "{{\"type\":\"css-display-none\",\"selector\":\"{}\"}}",
-            json_escape(sel)
-        )
-    };
-    Some(format!(
-        "{{\"trigger\":{{{}}},\"action\":{action}}}",
-        parts.join(",")
-    ))
-}
-
-/// Uma linha ABP -> objeto JSON. None = comentário ou sem mapeamento
-/// fiel (conta como pulada, só log em debug).
-fn abp_rule(line: &str, skipped: &mut usize) -> Option<String> {
-    let line = line.trim();
-    if line.is_empty() || line.starts_with('!') || line.starts_with('[') {
-        return None;
-    }
-    // Snippets/scriptlets/procedural estendido: fora do subconjunto.
-    if line.contains("#$#") || line.contains("#?#") || line.contains("$$") || line.contains("+js") {
-        *skipped += 1;
-        return None;
-    }
-    let r = if line.contains("#@#") || line.contains("##") {
-        cosmetic_rule(line)
-    } else {
-        network_rule(line)
-    };
-    if r.is_none() {
-        *skipped += 1;
-    }
-    r
-}
-
-/// Texto ABP completo -> JSON `[...]` (+ contagem p/ log e testes).
-fn abp_compile(text: &str) -> (String, usize, usize) {
-    let mut out = String::from("[");
-    let mut n = 0;
-    let mut skipped = 0;
-    for line in text.lines() {
-        if n >= FILTER_RULE_CAP {
-            skipped += 1;
-            continue;
-        }
-        if let Some(rule) = abp_rule(line, &mut skipped) {
-            if n > 0 {
-                out.push(',');
-            }
-            out.push_str(&rule);
-            n += 1;
-        }
-    }
-    out.push(']');
-    (out, n, skipped)
-}
-
-fn fetch_text(url: &str) -> Result<String, String> {
-    ureq::get(url)
-        .timeout(std::time::Duration::from_secs(30))
-        .call()
-        .map_err(|e| e.to_string())?
-        .into_string()
-        .map_err(|e| e.to_string())
-}
-
-/// Filtros compilados por fonte (id -> filtro). Vazio = desligado ou
-/// ainda carregando (tabs abrem sem bloqueio até aplicar).
-#[derive(Clone, Default)]
-struct AdblockState {
-    filters: Rc<std::cell::RefCell<std::collections::HashMap<String, webkit6::UserContentFilter>>>,
-}
-
-/// Guarda o filtro e aplica em todas as tabs abertas (remove o antigo
-/// do mesmo id antes, senão acumula).
-fn adblock_apply(state: &Shared, id: &str, filter: &webkit6::UserContentFilter) {
-    let st = state.borrow();
-    st.adblock
-        .filters
-        .borrow_mut()
-        .insert(id.to_string(), filter.clone());
-    for t in &st.tabs {
-        if let TabKind::Web { ucm, .. } = &t.kind {
-            ucm.remove_filter_by_id(id);
-            ucm.add_filter(filter);
-        }
-    }
-}
-
-/// Liga/desliga global (`adblock` no conf, F5 reaplica): off limpa os
-/// filtros de todas as tabs; on carrega do cache/rede.
-fn adblock_set_enabled(state: &Shared, enabled: bool) {
-    if !enabled {
-        let st = state.borrow();
-        st.adblock.filters.borrow_mut().clear();
-        for t in &st.tabs {
-            if let TabKind::Web { ucm, .. } = &t.kind {
-                ucm.remove_all_filters();
-            }
-        }
-        return;
-    }
-    adblock_start(state);
-}
-
-/// Carrega do cache (fresco) ou baixa+compila em thread. Nunca bloqueia
-/// a UI: tabs abrem sem filtro até aplicar; o poll morre sem a janela.
-fn adblock_start(state: &Shared) {
-    let dir = filter_cache_dir();
-    let _ = std::fs::create_dir_all(&dir);
-    if filter_fresh() {
-        for (id, _) in FILTER_SOURCES {
-            let store = webkit6::UserContentFilterStore::new(&dir.to_string_lossy());
-            let s = state.clone();
-            let id = id.to_string();
-            let id2 = id.clone();
-            store.load(
-                &id,
-                None::<&gtk4::gio::Cancellable>,
-                move |res| match res {
-                    Ok(f) => adblock_apply(&s, &id2, &f),
-                    Err(e) => {
-                        if std::env::var("DAHOOK_DEBUG_KEYS").is_ok() {
-                            eprintln!("dahook adblock: sem cache {id2}: {e}");
-                        }
-                    }
-                },
-            );
-        }
-        return;
-    }
-    let (tx, rx) = std::sync::mpsc::channel::<Vec<(String, String)>>();
-    // Compilados antigos invalidados: o refresh regrava tudo.
-    if let Ok(rd) = std::fs::read_dir(&dir) {
-        for e in rd.filter_map(|e| e.ok()) {
-            let p = e.path();
-            if p.file_name().is_some_and(|n| {
-                n.to_string_lossy().starts_with("ContentRuleList-")
-            }) {
-                let _ = std::fs::remove_file(&p);
-            }
-        }
-    }
-    std::thread::spawn(move || {
-        let mut compiled = Vec::new();
-        for (id, url) in FILTER_SOURCES {
-            match fetch_text(url) {
-                Ok(text) => {
-                    let (json, n, skipped) = abp_compile(&text);
-                    eprintln!("dahook adblock: {id}: {n} regras ({skipped} puladas)");
-                    compiled.push((id.to_string(), json));
-                }
-                Err(e) => eprintln!("dahook adblock: falha ao baixar {id}: {e}"),
-            }
-        }
-        let _ = tx.send(compiled);
-    });
-    let s = state.clone();
-    let weak = state.borrow().window.downgrade();
-    gtk4::glib::timeout_add_local(std::time::Duration::from_millis(500), move || {
-        use gtk4::glib::ControlFlow;
-        if weak.upgrade().is_none() {
-            return ControlFlow::Break;
-        }
-        match rx.try_recv() {
-            Ok(compiled) => {
-                for (id, json) in compiled {
-                    let store = webkit6::UserContentFilterStore::new(
-                        &filter_cache_dir().to_string_lossy(),
-                    );
-                    let s2 = s.clone();
-                    let id2 = id.clone();
-                    let bytes = gtk4::glib::Bytes::from_owned(json.into_bytes());
-                    store.save(
-                        &id,
-                        &bytes,
-                        None::<&gtk4::gio::Cancellable>,
-                        move |res| match res {
-                            Ok(f) => {
-                                filter_touch(&id2);
-                                adblock_apply(&s2, &id2, &f);
-                            }
-                            Err(e) => eprintln!("dahook adblock: filtro {id2} inválido: {e}"),
-                        },
-                    );
-                }
-                ControlFlow::Break
-            }
-            Err(std::sync::mpsc::TryRecvError::Empty) => ControlFlow::Continue,
-            Err(std::sync::mpsc::TryRecvError::Disconnected) => ControlFlow::Break,
-        }
-    });
-}
-
 /// Extrai "12.3" de "[download]  12.3% of ...". Puro, testável.
 /// É o % real que o hover do ■ exibe durante o yt-dlp.
 fn parse_ytdlp_pct(line: &str) -> Option<f64> {
@@ -1404,16 +907,9 @@ fn new_browser_tab(state: &Shared, url: &str) {
         }
         }
     });
-    // Content manager próprio da tab (adblock + futuros scripts).
-    // Aplica os filtros já carregados (refresh aplica nos abertos).
-    let ucm = webkit6::UserContentManager::new();
-    for f in state.borrow().adblock.filters.borrow().values() {
-        ucm.add_filter(f);
-    }
     let view = webkit6::WebView::builder()
         .network_session(&session)
         .settings(&settings)
-        .user_content_manager(&ucm)
         .build();
     if std::env::var("DAHOOK_DEBUG_KEYS").is_ok() {
         view.connect_load_changed(|v, ev| {
@@ -1604,7 +1100,7 @@ fn new_browser_tab(state: &Shared, url: &str) {
         st.tabs.push(Tab {
             page: page.clone(),
             title,
-            kind: TabKind::Web { view: view.clone(), ucm: ucm.clone(), urlrow: urlrow.clone(), urlbar: urlbar.clone(), dlstop: dlstop.clone() },
+            kind: TabKind::Web { view: view.clone(), urlrow: urlrow.clone(), urlbar: urlbar.clone(), dlstop: dlstop.clone() },
         });
         st.notebook.set_show_tabs(st.tabs.len() > 1);
         if std::env::var("DAHOOK_DEBUG_KEYS").is_ok() {
@@ -2318,14 +1814,12 @@ fn do_action(state: &Shared, name: &str, args: &[String]) {
         }
         "load_config_file" => {
             let path;
-            let adblock_on;
             {
                 let mut st = state.borrow_mut();
                 path = st.conf_path.clone();
                 st.cfg = DahookConfig::load(&path);
                 st.font_size = st.cfg.font_size;
                 st.opacity = st.cfg.background_opacity;
-                adblock_on = st.cfg.adblock;
                 if !st.cfg.ignored.is_empty() {
                     eprintln!(
                         "dahook: ignoradas: {}",
@@ -2335,7 +1829,6 @@ fn do_action(state: &Shared, name: &str, args: &[String]) {
             }
             apply_all_terms(state);
             rebuild_shortcuts(state);
-            adblock_set_enabled(state, adblock_on);
         }
         "send_text" => {
             // send_text all Hello World -> alimenta a tab atual.
@@ -2626,7 +2119,6 @@ fn build_ui(app: &gtk4::Application) {
             "dl-media",
             Some(&String::static_variant_type()),
         ),
-        adblock: AdblockState::default(),
     }));
 
     // Ação do item "Baixar mídia (yt-dlp)" do menu de contexto (param = URL).
@@ -2668,10 +2160,6 @@ fn build_ui(app: &gtk4::Application) {
 
     rebuild_shortcuts(&state);
     new_tab(&state, None, None);
-    // Adblock estilo uBO (conf `adblock`, padrão ligado).
-    if state.borrow().cfg.adblock {
-        adblock_start(&state);
-    }
 
     // Ação remota `open-url`: o comando `dahook <url>` (CLI) abre browser
     // na instância principal via Gio actions (single-instance).
@@ -2775,78 +2263,6 @@ mod tests {
         std::fs::write(dir.join("README"), b"x").unwrap();
         assert_eq!(unique_name(&dir, "README").file_name().unwrap(), "README.2");
         let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn adblock_tmp_dump2() {
-        for (id, url) in [
-            ("easylist", "https://easylist.to/easylist/easylist.txt"),
-            ("easyprivacy", "https://easylist.to/easylist/easyprivacy.txt"),
-        ] {
-            let text = fetch_text(url).unwrap();
-            let (json, n, skipped) = abp_compile(&text);
-            let path = format!("/tmp/opencode/{id}.v2.json");
-            std::fs::write(&path, json).unwrap();
-            eprintln!("dump2 {id}: {n} regras, {skipped} puladas");
-        }
-    }
-
-    #[test]
-    fn adblock_network_basic() {
-        let (json, n, _) = abp_compile("||ads.example.com^\n");
-        assert_eq!(n, 1);
-        assert!(json.starts_with('[') && json.ends_with(']'));
-        assert!(json.contains("^https?://([^/]*\\\\.)?ads\\\\.example\\\\.com[^a-zA-Z0-9_.%-]"));
-        assert!(json.contains("\"type\":\"block\""));
-        // Comentário e cabeçalho não viram regra.
-        let (_, n2, _) = abp_compile("! coment\n[Adblock Plus 2.0]\n||a.com^\n");
-        assert_eq!(n2, 1);
-    }
-
-    #[test]
-    fn adblock_options_and_skip() {
-        let (json, n, skipped) = abp_compile(
-            "||x.com^$script,third-party,domain=a.com|~b.com\n\
-             ||y.com^$popup\n\
-             ||z.com^$csp=script-src 'none'\n\
-             ||w.com^$~script\n",
-        );
-        assert_eq!(n, 1);
-        assert_eq!(skipped, 3);
-        assert!(json.contains("\"resource-type\":[\"script\"]"));
-        assert!(json.contains("\"load-type\":[\"third-party\"]"));
-        assert!(json.contains("\"if-domain\":[\"*a.com\"]"));
-        assert!(json.contains("\"unless-domain\":[\"*b.com\"]"));
-    }
-
-    #[test]
-    fn adblock_cosmetic() {
-        let (json, n, _) = abp_compile("a.com,b.com##.adbox\n##.global-ad\n@@||ok.com^\n");
-        assert_eq!(n, 3);
-        assert!(json.contains("\"type\":\"css-display-none\",\"selector\":\".adbox\""));
-        assert!(json.contains("\"if-domain\":[\"*a.com\",\"*b.com\"]"));
-        assert!(json.contains("\"type\":\"ignore-previous-rules\""));
-        // Procedural não existe no WebKit: pula.
-        let (_, n2, skipped2) = abp_compile("a.com##div:has(.x)\n");
-        assert_eq!((n2, skipped2), (0, 1));
-    }
-
-    #[test]
-    fn adblock_unmappable_scope_skipped() {
-        // `*$ping,third-party`: ping não existe no WebKit; sem tipo
-        // mapeável junto, aplicar viraria "bloqueia tudo third-party"
-        // (matou o stream do YouTube) — pula. Com tipo mapeável,
-        // ignora o extra (sub-bloqueio seguro).
-        let (json, n, skipped) =
-            abp_compile("*$ping,third-party\n||a.com^$script,websocket\n");
-        assert_eq!(n, 1);
-        assert_eq!(skipped, 1);
-        assert!(json.contains("\"resource-type\":[\"script\"]"));
-    }
-
-    #[test]
-    fn adblock_json_escape() {
-        assert_eq!(json_escape("a\"b\\c"), "a\\\"b\\\\c");
     }
 
     #[test]

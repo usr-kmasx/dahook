@@ -18,8 +18,7 @@ Criado com exemplo comentado na primeira execução.
 Aplicadas: `font_family`, `font_size`, `foreground`, `background`,
 `background_opacity`, `color0`-`color255`, `cursor`, `cursor_shape`,
 `cursor_blink_interval`, `selection_foreground/background`,
-`scrollback_lines`, `window_padding_width`, `shell`, `env`, `adblock`
-(ligado por padrão; `adblock no` desliga, vale no `F5`),
+`scrollback_lines`, `window_padding_width`, `shell`, `env`,
 `kitty_mod`, `map`, `include`. O resto é aceito e ignorado com aviso.
 
 ## Atalhos: os do kitty (`kitty_mod` = `ctrl+shift` por padrão)
@@ -75,19 +74,6 @@ vira browser); digitado fora do app, só abre. Tabs têm botão ×.
 - **Shell**: o app nunca escreve no seu history. Para a URL nem chegar
   lá, digite com **espaço na frente** (` dahook exemplo.com`) — o fish
   ignora comandos com espaço inicial (provado em teste).
-
-## Bloqueador estilo uBlock (ligado por padrão)
-
-A extensão do Chrome não roda no WebKitGTK; o equivalente aqui são as
-próprias listas do uBO (**EasyList + EasyPrivacy**), baixadas e
-compiladas para o content-blocker nativo do WebKit (~45 mil regras por
-lista; o que não tem tradução fiel é pulado, nunca aplicado errado).
-Cache em `~/.cache/dahook/filters`, atualiza sozinho a cada 7 dias.
-Liga/desliga global no conf (vale ao abrir e no `F5`):
-
-```conf
-adblock no
-```
 
 ## Mídia na tab browser
 

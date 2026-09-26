@@ -12,4 +12,3 @@ gtk4 = { version = "0.11", features = ["v4_22"] }
 vte4 = { version = "0.10", features = ["v0_84"] }
 webkit6 = "0.6"
 libc = "0.2"
-ureq = "2"
