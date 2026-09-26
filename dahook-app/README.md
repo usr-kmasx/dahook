@@ -18,7 +18,8 @@ Criado com exemplo comentado na primeira execução.
 Aplicadas: `font_family`, `font_size`, `foreground`, `background`,
 `background_opacity`, `color0`-`color255`, `cursor`, `cursor_shape`,
 `cursor_blink_interval`, `selection_foreground/background`,
-`scrollback_lines`, `window_padding_width`, `shell`, `env`,
+`scrollback_lines`, `window_padding_width`, `shell`, `env`, `adblock`
+(ligado por padrão; `adblock no` desliga, vale no `F5`),
 `kitty_mod`, `map`, `include`. O resto é aceito e ignorado com aviso.
 
 ## Atalhos: os do kitty (`kitty_mod` = `ctrl+shift` por padrão)
