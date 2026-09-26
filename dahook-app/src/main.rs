@@ -709,9 +709,13 @@ fn abp_resource(opt: &str) -> Option<&'static str> {
 
 /// Tokens `$` sem efeito aqui (só afetariam prioridade/nuance):
 /// ignorar é seguro (pode sub-bloquear um pouco, nunca quebra site).
-const ABP_IGNORE_OPTS: &[&str] = &[
-    "important", "match-case", "donottrack", "empty", "mp4", "websocket", "ping",
-];
+const ABP_IGNORE_OPTS: &[&str] = &["important", "match-case", "donottrack", "empty", "mp4"];
+
+/// Tipos de recurso que o WebKit não tem (websocket, ping, webrtc):
+/// se a regra mira SÓ neles, pular (aplicar sem o tipo viraria
+/// "bloqueia tudo" — foi o `*$ping,third-party` que matou o YouTube).
+/// Com tipo mapeável junto, ignora o extra (sub-bloqueio seguro).
+const ABP_UNMAPPABLE_RES: &[&str] = &["websocket", "ping", "webrtc"];
 
 /// Regra de rede ABP -> objeto JSON (`@@` vira ignore-previous-rules).
 /// None = modificador sem mapeamento fiel (csp, redirect, popup...):
@@ -729,7 +733,13 @@ fn network_rule(line: &str) -> Option<String> {
     if pat.is_empty() {
         return None;
     }
+    // Pattern `*` puro sem opções = "bloqueia tudo": nenhuma lista séria
+    // envia isso; se enviar, é erro — nunca aplicar.
+    if pat == "*" && opts.is_empty() {
+        return None;
+    }
     let mut res_types: Vec<&str> = Vec::new();
+    let mut saw_unmappable = false;
     let mut if_domain: Vec<String> = Vec::new();
     let mut unless_domain: Vec<String> = Vec::new();
     let mut load_type: Option<&str> = None;
@@ -762,10 +772,16 @@ fn network_rule(line: &str) -> Option<String> {
             "first-party" | "~third-party" => load_type = Some("first-party"),
             "~first-party" => load_type = Some("third-party"),
             t if abp_resource(t).is_some() => res_types.push(abp_resource(t).unwrap()),
+            t if ABP_UNMAPPABLE_RES.contains(&t) => saw_unmappable = true,
             t if ABP_IGNORE_OPTS.contains(&t) => {}
             // `$~script` e cia (negação de tipo) não existem no WebKit.
             _ => return None,
         }
+    }
+    // Mira só em tipo sem mapeamento: sem restrição aplicável, pular
+    // (senão vira "bloqueia tudo do escopo").
+    if res_types.is_empty() && saw_unmappable {
+        return None;
     }
     let url_filter = abp_regex(pat)?;
     let mut parts = vec![format!("\"url-filter\":\"{}\"", json_escape(&url_filter))];
@@ -2762,6 +2778,20 @@ mod tests {
     }
 
     #[test]
+    fn adblock_tmp_dump2() {
+        for (id, url) in [
+            ("easylist", "https://easylist.to/easylist/easylist.txt"),
+            ("easyprivacy", "https://easylist.to/easylist/easyprivacy.txt"),
+        ] {
+            let text = fetch_text(url).unwrap();
+            let (json, n, skipped) = abp_compile(&text);
+            let path = format!("/tmp/opencode/{id}.v2.json");
+            std::fs::write(&path, json).unwrap();
+            eprintln!("dump2 {id}: {n} regras, {skipped} puladas");
+        }
+    }
+
+    #[test]
     fn adblock_network_basic() {
         let (json, n, _) = abp_compile("||ads.example.com^\n");
         assert_eq!(n, 1);
@@ -2799,6 +2829,19 @@ mod tests {
         // Procedural não existe no WebKit: pula.
         let (_, n2, skipped2) = abp_compile("a.com##div:has(.x)\n");
         assert_eq!((n2, skipped2), (0, 1));
+    }
+
+    #[test]
+    fn adblock_unmappable_scope_skipped() {
+        // `*$ping,third-party`: ping não existe no WebKit; sem tipo
+        // mapeável junto, aplicar viraria "bloqueia tudo third-party"
+        // (matou o stream do YouTube) — pula. Com tipo mapeável,
+        // ignora o extra (sub-bloqueio seguro).
+        let (json, n, skipped) =
+            abp_compile("*$ping,third-party\n||a.com^$script,websocket\n");
+        assert_eq!(n, 1);
+        assert_eq!(skipped, 1);
+        assert!(json.contains("\"resource-type\":[\"script\"]"));
     }
 
     #[test]
