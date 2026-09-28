@@ -55,34 +55,40 @@ arch)
   run sudo pacman -S --needed --noconfirm \
     gtk4 libadwaita vte4 webkitgtk-6.0 \
     gst-plugins-base gst-plugins-good gst-plugins-bad gst-plugins-ugly gst-libav \
-    yt-dlp
+    yt-dlp ffmpeg libnotify pkgconf gcc
   ;;
 debian)
   run sudo apt update
   run sudo apt install -y \
+    build-essential pkg-config \
     libgtk-4-dev libadwaita-1-dev libvte-2.91-gtk4-dev libwebkitgtk-6.0-dev \
     gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
     gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly gstreamer1.0-libav \
-    yt-dlp
+    yt-dlp ffmpeg libnotify-bin libglib2.0-bin
   ;;
 fedora)
   run sudo dnf install -y \
+    gcc pkgconf \
     gtk4-devel libadwaita-devel vte291-gtk4-devel webkitgtk6.0-devel \
     gstreamer1-plugins-base gstreamer1-plugins-good \
     gstreamer1-plugins-bad-free gstreamer1-plugins-ugly-free \
-    yt-dlp
-  echo "NOTA Fedora: para H.264/AAC completos, adicione RPM Fusion (gstreamer1-libav, *-nonfree)."
+    yt-dlp ffmpeg-free libnotify
+  echo "NOTA Fedora: para H.264/AAC completos, adicione RPM Fusion (gstreamer1-libav, *-nonfree, ffmpeg completo)."
   ;;
 suse)
   # Nomes -devel variam entre releases: resolve via capability pkgconfig,
   # que o zypper traduz para o pacote certo em qualquer versão.
   echo "setup-deps: openSUSE é best-effort (sem teste ao vivo aqui):" >&2
   run sudo zypper install -y \
+    gcc pkgconf \
     'pkgconfig(gtk4)' 'pkgconfig(libadwaita-1)' \
     'pkgconfig(vte-2.91-gtk4)' 'pkgconfig(webkitgtk-6.0)' \
     gstreamer-plugins-base gstreamer-plugins-good \
     gstreamer-plugins-bad gstreamer-plugins-ugly gstreamer-plugins-libav \
-    yt-dlp
+    yt-dlp libnotify-tools
+  # ffmpeg completo está no Packman; o OSS tem build limitado (pode bastar).
+  run sudo zypper install -y ffmpeg-4 \
+    || echo "AVISO openSUSE: instale o ffmpeg manualmente (Packman tem o completo)." >&2
   ;;
 esac
 
@@ -92,6 +98,15 @@ for pc in gtk4 vte-2.91-gtk4 webkitgtk-6.0; do
     echo "  ok $pc $(pkg-config --modversion "$pc")"
   else
     echo "  FALTA $pc" >&2
+  fi
+done
+
+echo "setup-deps: verificando runtime..."
+for bin in yt-dlp ffmpeg notify-send gapplication; do
+  if command -v "$bin" >/dev/null; then
+    echo "  ok $bin"
+  else
+    echo "  FALTA $bin" >&2
   fi
 done
 
