@@ -211,6 +211,8 @@ struct State {
     fullscreen: bool,
     maximized: bool,
     controller: Option<gtk4::EventControllerKey>,
+    /// CSS da cadeia transparente (só tem efeito com a classe ativa).
+    css_provider: gtk4::CssProvider,
     /// Ação Gio do menu "Baixar mídia (yt-dlp)" (param = URL).
     dl_action: gtk4::gio::SimpleAction,
     /// Filtros estilo uBO compilados (vazio = desligado/carregando).
@@ -2137,6 +2139,26 @@ fn apply_all_terms(state: &Shared) {
     }
 }
 
+/// Liga/desliga a cadeia transparente conforme a opacidade (< 1 vaza;
+/// == 1 volta ao tema opaco, sem custo visual). Provedor guardado no
+/// State (GObject não é Sync para static).
+fn apply_window_transparency(state: &Shared) {
+    let (window, opacity, provider) = {
+        let st = state.borrow();
+        (st.window.clone(), st.opacity, st.css_provider.clone())
+    };
+    if opacity < 1.0 {
+        window.add_css_class("dahook-transparent");
+        gtk4::style_context_add_provider_for_display(
+            &gtk4::gdk::Display::default().expect("sem display"),
+            &provider,
+            gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION,
+        );
+    } else {
+        window.remove_css_class("dahook-transparent");
+    }
+}
+
 fn set_tab_title_dialog(state: &Shared) {
     let (window, current) = {
         let st = state.borrow();
@@ -2336,6 +2358,7 @@ fn do_action(state: &Shared, name: &str, args: &[String]) {
             apply_all_terms(state);
             rebuild_shortcuts(state);
             adblock_set_enabled(state, adblock_on);
+            apply_window_transparency(state);
         }
         "send_text" => {
             // send_text all Hello World -> alimenta a tab atual.
@@ -2401,6 +2424,7 @@ fn do_action(state: &Shared, name: &str, args: &[String]) {
             };
             state.borrow_mut().opacity = new_opacity;
             apply_all_terms(state);
+            apply_window_transparency(state);
         }
         other => eprintln!("dahook: ação do kitty não suportada no MVP: {other}"),
     }
@@ -2621,6 +2645,14 @@ fn build_ui(app: &gtk4::Application) {
         fullscreen: false,
         maximized: false,
         controller: None,
+        css_provider: {
+            let p = gtk4::CssProvider::new();
+            p.load_from_string(
+                "window.dahook-transparent, window.dahook-transparent * \
+                 { background-color: transparent; background-image: none; }",
+            );
+            p
+        },
         perms: std::collections::HashMap::new(),
         dl_action: gtk4::gio::SimpleAction::new(
             "dl-media",
@@ -2707,6 +2739,7 @@ fn build_ui(app: &gtk4::Application) {
     });
 
     window.present();
+    apply_window_transparency(&state);
 }
 
 fn main() {
