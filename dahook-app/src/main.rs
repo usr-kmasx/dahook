@@ -256,7 +256,28 @@ fn apply_term(st: &State, term: &vte4::Terminal) {
     let cfg = &st.cfg;
     let font = format!("{} {}", cfg.font_family, st.font_size);
     if std::env::var("DAHOOK_DEBUG_KEYS").is_ok() {
-        eprintln!("dahook font: {font}");
+        eprintln!(
+            "dahook term: font={font} fg=({:.2},{:.2},{:.2}) bg=({:.2},{:.2},{:.2},{:.2}) \
+             cursor={:?} blink={} cursor_color={:?} sel={:?}/{:?} \
+             scrollback={} padding={} shell={:?} env={} palette={}",
+            cfg.foreground.r,
+            cfg.foreground.g,
+            cfg.foreground.b,
+            cfg.background.r,
+            cfg.background.g,
+            cfg.background.b,
+            st.opacity,
+            cfg.cursor_shape,
+            cfg.cursor_blink,
+            cfg.cursor_color,
+            cfg.selection_fg,
+            cfg.selection_bg,
+            cfg.scrollback_lines,
+            cfg.window_padding,
+            cfg.shell,
+            cfg.env.len(),
+            cfg.palette.len(),
+        );
     }
     term
         .set_font(Some(&gtk4::pango::FontDescription::from_string(&font)));

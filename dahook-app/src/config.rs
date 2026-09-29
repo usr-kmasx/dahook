@@ -405,8 +405,10 @@ impl DahookConfig {
                 };
             }
             "cursor_blink_interval" => {
-                // kitty: 0 desliga o blink.
-                self.cursor_blink = val.parse::<f64>().is_ok_and(|n| n != 0.0);
+                // kitty: 0 desliga o blink. Inválido mantém o padrão.
+                if let Ok(n) = val.parse::<f64>() {
+                    self.cursor_blink = n != 0.0;
+                }
             }
             "selection_foreground" => {
                 if let Some(c) = parse_color(val) {
@@ -666,6 +668,42 @@ mod tests {
         // Padrão ligado; opção conhecida (não vai para ignoradas).
         assert!(DahookConfig::default().adblock);
         assert!(!off.ignored.contains(&"adblock".to_string()));
+    }
+
+    #[test]
+    fn per_option_values() {
+        let c = DahookConfig::parse(
+            "foreground #c0caf5\n\
+             cursor #ff0000\n\
+             cursor_shape underscore\n\
+             cursor_blink_interval xyz\n\
+             selection_foreground #000000\n\
+             selection_background #fffacd\n\
+             scrollback_lines abc\n\
+             window_padding_width 999\n\
+             shell /bin/false --x\n\
+             env FOO=bar=baz\n\
+             color255 #ffffff\n\
+             color999 #ffffff\n",
+        );
+        assert_eq!(c.foreground.r, 0xc0 as f64 / 255.0);
+        assert_eq!(c.cursor_color, Some(Rgba::rgb(1.0, 0.0, 0.0)));
+        assert_eq!(c.cursor_shape, CursorShape::Underline);
+        // Inválido mantém o padrão (ligado), não desliga.
+        assert!(c.cursor_blink);
+        assert_eq!(c.selection_fg, Some(Rgba::rgb(0.0, 0.0, 0.0)));
+        assert_eq!(c.selection_bg.map(|c| c.b), Some(0xcd as f64 / 255.0));
+        assert_eq!(c.scrollback_lines, 2000);
+        assert_eq!(c.window_padding, 64);
+        assert_eq!(
+            c.shell,
+            Some(("/bin/false".into(), vec!["--x".into()]))
+        );
+        assert_eq!(c.env.get("FOO").map(String::as_str), Some("bar=baz"));
+        assert!(c.palette.contains_key(&255));
+        assert!(!c.palette.contains_key(&200));
+        // color999: fora de 0-255, cai em ignoradas.
+        assert!(c.ignored.contains(&"color999".to_string()));
     }
 
     #[test]
